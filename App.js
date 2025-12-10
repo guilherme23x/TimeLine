@@ -15,6 +15,8 @@ import {
   Dimensions,
 } from 'react-native';
 import * as Notifications from 'expo-notifications';
+import * as TaskManager from 'expo-task-manager';
+import * as BackgroundFetch from 'expo-background-fetch';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   Moon,
@@ -109,122 +111,168 @@ import {
   ChevronDown,
 } from 'lucide-react-native';
 
-// --- CONFIGURAÇÃO ---
+// --- CONFIGURAÇÃO DE NOTIFICAÇÕES ---
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
     shouldPlaySound: true,
-    shouldSetBadge: false,
+    shouldSetBadge: true,
   }),
 });
 
+// --- TAREFA EM BACKGROUND ---
+const BACKGROUND_NOTIFICATION_TASK = 'BACKGROUND_NOTIFICATION_TASK';
+
+TaskManager.defineTask(BACKGROUND_NOTIFICATION_TASK, async () => {
+  try {
+    console.log('Background task executada');
+
+    // Carrega as tarefas do AsyncStorage
+    const tasksJson = await AsyncStorage.getItem('tasks');
+    if (!tasksJson) return BackgroundFetch.BackgroundFetchResult.NoData;
+
+    const tasks = JSON.parse(tasksJson);
+
+    // Reagenda todas as notificações
+    await scheduleAllNotifications(tasks);
+
+    return BackgroundFetch.BackgroundFetchResult.NewData;
+  } catch (error) {
+    console.error('Erro na tarefa de background:', error);
+    return BackgroundFetch.BackgroundFetchResult.Failed;
+  }
+});
+
+// Função auxiliar para agendar todas as notificações
+async function scheduleAllNotifications(tasks) {
+  // Cancela todas as notificações anteriores
+  await Notifications.cancelAllScheduledNotificationsAsync();
+
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+  for (const task of tasks) {
+    if (task.completed) continue;
+
+    const [hour, minute] = task.time.split(':').map(Number);
+
+    // Para tarefas sem recorrência
+    if (task.recurrence === 'none' && task.dateISO) {
+      const taskDate = new Date(task.dateISO);
+      taskDate.setHours(hour, minute, 0, 0);
+
+      // Só agenda se for no futuro
+      if (taskDate.getTime() > now.getTime()) {
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title: "⏰ Lembrete de Tarefa",
+            body: `${task.time} - ${task.title}`,
+            data: { taskId: task.id },
+            sound: true,
+          },
+          trigger: taskDate,
+        });
+        console.log(`Notificação agendada: ${task.title} em ${taskDate}`);
+      }
+    }
+
+    // Para tarefas com recorrência
+    else if (task.recurrence !== 'none') {
+      // Agenda para os próximos 7 dias
+      for (let i = 0; i < 7; i++) {
+        const futureDate = new Date(today);
+        futureDate.setDate(today.getDate() + i);
+        futureDate.setHours(hour, minute, 0, 0);
+
+        // Verifica se deve mostrar neste dia
+        const dayOfWeek = futureDate.getDay();
+        let shouldSchedule = false;
+
+        if (task.recurrence === 'daily') {
+          shouldSchedule = true;
+        } else if (task.recurrence === 'weekdays') {
+          shouldSchedule = dayOfWeek >= 1 && dayOfWeek <= 5;
+        } else if (task.recurrence === 'weekends') {
+          shouldSchedule = dayOfWeek === 0 || dayOfWeek === 6;
+        }
+
+        // Só agenda se for no futuro e se deve aparecer neste dia
+        if (shouldSchedule && futureDate.getTime() > now.getTime()) {
+          await Notifications.scheduleNotificationAsync({
+            content: {
+              title: "⏰ Lembrete de Tarefa",
+              body: `${task.time} - ${task.title}`,
+              data: { taskId: task.id },
+              sound: true,
+            },
+            trigger: futureDate,
+          });
+          console.log(`Notificação recorrente agendada: ${task.title} em ${futureDate}`);
+        }
+      }
+    }
+  }
+}
+
+// Registra a tarefa de background
+async function registerBackgroundFetchAsync() {
+  try {
+    await BackgroundFetch.registerTaskAsync(BACKGROUND_NOTIFICATION_TASK, {
+      minimumInterval: 15 * 60, // 15 minutos (mínimo permitido pelo iOS)
+      stopOnTerminate: false,
+      startOnBoot: true,
+    });
+    console.log('Background fetch registrado com sucesso');
+  } catch (err) {
+    console.error('Erro ao registrar background fetch:', err);
+  }
+}
+
 const { width } = Dimensions.get('window');
 const CALENDAR_COL_WIDTH = (width - 40) / 7;
-const ITEM_HEIGHT = 50; // Usado apenas no WheelPicker
+const ITEM_HEIGHT = 50;
 
-// Cálculo estimado da altura de um mês para o scroll
-// Título (20) + Margem Titulo (15) + Margem Container (30) + (6 fileiras * (AlturaDia + MargemDia))
 const MONTH_HEADER_HEIGHT = 65;
 const DAY_ROW_HEIGHT = CALENDAR_COL_WIDTH + 4;
-const ESTIMATED_MONTH_HEIGHT = MONTH_HEADER_HEIGHT + DAY_ROW_HEIGHT * 5.2; // Média de 5.2 semanas/mês
+const ESTIMATED_MONTH_HEIGHT = MONTH_HEADER_HEIGHT + DAY_ROW_HEIGHT * 5.2;
 
 // --- ÍCONES ---
 const ICON_LIBRARY = [
   { id: 'moon', component: Moon, tags: 'lua noite dormir sono escuro' },
   { id: 'sun', component: Sun, tags: 'sol dia manhã acordar claro brilho' },
-  {
-    id: 'check',
-    component: CheckCircle2,
-    tags: 'check feito ok concluído sucesso',
-  },
+  { id: 'check', component: CheckCircle2, tags: 'check feito ok concluído sucesso' },
   { id: 'walk', component: Footprints, tags: 'caminhar andar passos pegadas' },
-  {
-    id: 'gym',
-    component: Dumbbell,
-    tags: 'academia treino peso força musculo',
-  },
+  { id: 'gym', component: Dumbbell, tags: 'academia treino peso força musculo' },
   { id: 'fire', component: Flame, tags: 'fogo calor queimar intenso energia' },
-  {
-    id: 'snow',
-    component: Snowflake,
-    tags: 'neve frio gelo inverno ar condicionado',
-  },
-  {
-    id: 'food',
-    component: Salad,
-    tags: 'comida dieta salada saudavel almoço jantar',
-  },
-  {
-    id: 'coffee',
-    component: Coffee,
-    tags: 'cafe energia bebida quente manha pausa',
-  },
-  {
-    id: 'book',
-    component: BookOpen,
-    tags: 'livro ler estudo leitura educação',
-  },
-  {
-    id: 'work',
-    component: Briefcase,
-    tags: 'trabalho escritorio emprego mala negocio',
-  },
-  {
-    id: 'meditate',
-    component: BrainCircuit,
-    tags: 'meditar cerebro mente foco pensar',
-  },
+  { id: 'snow', component: Snowflake, tags: 'neve frio gelo inverno ar condicionado' },
+  { id: 'food', component: Salad, tags: 'comida dieta salada saudavel almoço jantar' },
+  { id: 'coffee', component: Coffee, tags: 'cafe energia bebida quente manha pausa' },
+  { id: 'book', component: BookOpen, tags: 'livro ler estudo leitura educação' },
+  { id: 'work', component: Briefcase, tags: 'trabalho escritorio emprego mala negocio' },
+  { id: 'meditate', component: BrainCircuit, tags: 'meditar cerebro mente foco pensar' },
   { id: 'music', component: Music, tags: 'musica som ouvir canção artista' },
   { id: 'pill', component: Pill, tags: 'remedio pilula saude medico vitamina' },
-  {
-    id: 'bed',
-    component: BedDouble,
-    tags: 'cama dormir quarto descanso soneca',
-  },
+  { id: 'bed', component: BedDouble, tags: 'cama dormir quarto descanso soneca' },
   { id: 'star', component: Star, tags: 'estrela destaque favorito importante' },
   { id: 'heart', component: Heart, tags: 'coração amor saude vida gostar' },
-  {
-    id: 'money',
-    component: DollarSign,
-    tags: 'dinheiro finanças economia pagamento',
-  },
+  { id: 'money', component: DollarSign, tags: 'dinheiro finanças economia pagamento' },
   { id: 'game', component: Gamepad2, tags: 'jogo videogame diversão controle' },
   { id: 'travel', component: Plane, tags: 'viagem avião voar ferias turismo' },
   { id: 'car', component: Car, tags: 'carro dirigir transito veiculo' },
-  {
-    id: 'shop',
-    component: ShoppingCart,
-    tags: 'compras mercado loja carrinho',
-  },
+  { id: 'shop', component: ShoppingCart, tags: 'compras mercado loja carrinho' },
   { id: 'phone', component: Smartphone, tags: 'celular telefone mensagem app' },
-  {
-    id: 'water',
-    component: Droplets,
-    tags: 'agua beber hidratação gotas chuva',
-  },
+  { id: 'water', component: Droplets, tags: 'agua beber hidratação gotas chuva' },
   { id: 'wifi', component: Wifi, tags: 'internet conexão rede online' },
   { id: 'energy', component: Zap, tags: 'energia eletricidade rapido flash' },
   { id: 'home', component: Home, tags: 'casa lar moradia familia' },
   { id: 'users', component: Users, tags: 'pessoas grupo amigos equipe social' },
   { id: 'pet', component: Dog, tags: 'cachorro gato animal pet estimação' },
-  {
-    id: 'bike',
-    component: Bike,
-    tags: 'bicicleta pedalar ciclismo transporte',
-  },
-  {
-    id: 'art',
-    component: PenTool,
-    tags: 'arte desenho design caneta criativo',
-  },
+  { id: 'bike', component: Bike, tags: 'bicicleta pedalar ciclismo transporte' },
+  { id: 'art', component: PenTool, tags: 'arte desenho design caneta criativo' },
   { id: 'camera', component: Camera, tags: 'foto camera imagem video' },
   { id: 'headphone', component: Headphones, tags: 'fone ouvir podcast audio' },
   { id: 'gift', component: Gift, tags: 'presente aniversario surpresa caixa' },
-  {
-    id: 'calendar',
-    component: CalendarIcon,
-    tags: 'calendario data agenda prazo',
-  },
+  { id: 'calendar', component: CalendarIcon, tags: 'calendario data agenda prazo' },
   { id: 'clock', component: Clock, tags: 'relogio tempo hora prazo' },
   { id: 'map', component: MapPin, tags: 'mapa local gps endereço' },
   { id: 'smile', component: Smile, tags: 'sorriso feliz alegria bom' },
@@ -234,11 +282,7 @@ const ICON_LIBRARY = [
   { id: 'battery', component: Battery, tags: 'bateria carga energia' },
   { id: 'bell', component: Bell, tags: 'sino notificação alerta' },
   { id: 'bluetooth', component: Bluetooth, tags: 'bluetooth conexão sem fio' },
-  {
-    id: 'calculator',
-    component: Calculator,
-    tags: 'calculadora contas matematica',
-  },
+  { id: 'calculator', component: Calculator, tags: 'calculadora contas matematica' },
   { id: 'cloud', component: Cloud, tags: 'nuvem tempo clima dados' },
   { id: 'code', component: Code, tags: 'codigo programação dev tecnologia' },
   { id: 'cpu', component: Cpu, tags: 'chip processador computador tech' },
@@ -262,20 +306,12 @@ const ICON_LIBRARY = [
   { id: 'scissors', component: Scissors, tags: 'tesoura cortar recortar' },
   { id: 'search', component: Search, tags: 'busca lupa procurar pesquisar' },
   { id: 'server', component: Server, tags: 'servidor rack dados' },
-  {
-    id: 'settings',
-    component: Settings,
-    tags: 'configurar engrenagem ajustes',
-  },
+  { id: 'settings', component: Settings, tags: 'configurar engrenagem ajustes' },
   { id: 'share', component: Share, tags: 'compartilhar enviar rede' },
   { id: 'shield', component: Shield, tags: 'escudo proteção defesa' },
   { id: 'speaker', component: Speaker, tags: 'som alto-falante volume' },
   { id: 'target', component: Target, tags: 'alvo meta objetivo foco' },
-  {
-    id: 'thermometer',
-    component: Thermometer,
-    tags: 'temperatura termometro febre',
-  },
+  { id: 'thermometer', component: Thermometer, tags: 'temperatura termometro febre' },
   { id: 'like', component: ThumbsUp, tags: 'curtir joinha like bom' },
   { id: 'trash', component: Trash, tags: 'lixo excluir deletar remover' },
   { id: 'truck', component: Truck, tags: 'caminhão transporte frete' },
@@ -386,7 +422,6 @@ export default function App() {
 
   const [selectedCalendarDate, setSelectedCalendarDate] = useState(new Date());
 
-  // Gera 2 anos de meses
   const calendarMonths = useMemo(() => {
     const months = [];
     const today = new Date();
@@ -396,8 +431,6 @@ export default function App() {
     }
     return months;
   }, []);
-
-  const notificationTimeout = useRef(null);
 
   const isDark =
     themeMode === 'dark' || (themeMode === 'auto' && systemScheme === 'dark');
@@ -439,16 +472,37 @@ export default function App() {
   useEffect(() => {
     loadData();
     requestPermissions();
+    registerBackgroundFetchAsync();
+
+    // Listener para quando uma notificação for recebida enquanto o app está em foreground
+    const subscription = Notifications.addNotificationReceivedListener(notification => {
+      console.log('Notificação recebida:', notification);
+    });
+
+    // Listener para quando o usuário tocar na notificação
+    const responseSubscription = Notifications.addNotificationResponseReceivedListener(response => {
+      console.log('Usuário tocou na notificação:', response);
+    });
+
+    return () => {
+      subscription.remove();
+      responseSubscription.remove();
+    };
   }, []);
 
   useEffect(() => {
     saveData();
-    scheduleNextNotification();
+    scheduleAllNotifications(tasks);
   }, [tasks]);
 
   const requestPermissions = async () => {
     const { status } = await Notifications.requestPermissionsAsync();
-    if (status !== 'granted') Alert.alert('Aviso', 'Notificações desativadas');
+    if (status !== 'granted') {
+      Alert.alert(
+        'Permissões necessárias',
+        'Para receber lembretes, ative as notificações nas configurações do app.'
+      );
+    }
   };
 
   const loadData = async () => {
@@ -476,10 +530,6 @@ export default function App() {
     } catch (e) {
       console.error(e);
     }
-  };
-
-  const scheduleNextNotification = () => {
-    if (notificationTimeout.current) clearTimeout(notificationTimeout.current);
   };
 
   const updateTaskTime = (type, value) => {
@@ -703,9 +753,8 @@ export default function App() {
     const month = monthDate.getMonth();
 
     const daysInMonth = new Date(year, month + 1, 0).getDate();
-    const firstDayOfWeek = new Date(year, month, 1).getDay(); // 0 = Domingo
+    const firstDayOfWeek = new Date(year, month, 1).getDay();
 
-    // Create grid array
     const grid = [];
     for (let i = 0; i < firstDayOfWeek; i++) {
       grid.push(null);
@@ -713,9 +762,6 @@ export default function App() {
     for (let i = 1; i <= daysInMonth; i++) {
       grid.push(new Date(year, month, i));
     }
-
-    const isCurrentMonth =
-      new Date().getMonth() === month && new Date().getFullYear() === year;
 
     return (
       <View style={{ marginBottom: 30 }}>
@@ -783,7 +829,6 @@ export default function App() {
 
     return (
       <View style={{ flex: 1 }}>
-        {/* PARTE 1: CALENDÁRIO COM ROLAGEM VERTICAL */}
         <View
           style={{
             height: '55%',
@@ -812,17 +857,15 @@ export default function App() {
               offset: ESTIMATED_MONTH_HEIGHT * index,
               index,
             })}
-            initialNumToRender={5} // Renderizar poucos itens para acelerar o scroll inicial
+            initialNumToRender={5}
             showsVerticalScrollIndicator={false}
           />
         </View>
 
-        {/* PARTE 2: LISTA DE TAREFAS (COMO ERA ANTES) */}
         <View style={{ flex: 1, backgroundColor: theme.background }}>
           <ScrollView
             style={styles.scrollView}
-            contentContainerStyle={{ paddingBottom: 80 }} // AUMENTADO: Espaço extra no final da lista
-          >
+            contentContainerStyle={{ paddingBottom: 80 }}>
             <Text
               style={[
                 styles.sectionTitle,
@@ -972,6 +1015,30 @@ export default function App() {
           })}
         </View>
       </View>
+
+      <TouchableOpacity
+        style={[
+          styles.settingCard,
+          { backgroundColor: theme.card, borderColor: theme.border },
+        ]}
+        onPress={async () => {
+          const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+          Alert.alert(
+            'Notificações Agendadas',
+            `Total: ${scheduled.length} notificações\n\n${scheduled.slice(0, 5).map(n =>
+              `${n.content.title}\n${new Date(n.trigger.value).toLocaleString('pt-BR')}`
+            ).join('\n\n')}${scheduled.length > 5 ? '\n\n...' : ''}`,
+            [{ text: 'OK' }]
+          );
+        }}>
+        <Text style={[styles.settingLabel, { color: theme.text }]}>
+          Ver Notificações Agendadas
+        </Text>
+        <Text style={{ color: theme.textSecondary, fontSize: 12, marginTop: 4 }}>
+          Toque para ver todas as notificações
+        </Text>
+      </TouchableOpacity>
+
       <TouchableOpacity
         style={[
           styles.settingCard,
@@ -1273,7 +1340,6 @@ export default function App() {
   );
 }
 
-// --- TEMAS ---
 const darkTheme = {
   background: '#000000',
   headerBg: '#121212',
@@ -1315,8 +1381,6 @@ const styles = StyleSheet.create({
   addButtonText: { fontSize: 24, fontWeight: '300', marginTop: -2 },
   scrollView: { flex: 1, padding: 20 },
   sectionTitle: { fontSize: 20, fontWeight: '700', marginBottom: 16 },
-
-  // Timeline
   taskContainer: { flexDirection: 'row', marginBottom: 24 },
   timelineLeft: { alignItems: 'center', marginRight: 16, width: 50 },
   timeText: { fontSize: 12, fontWeight: '600', marginBottom: 8 },
@@ -1358,8 +1422,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   checkButtonCompleted: { backgroundColor: '#34c759', borderColor: '#34c759' },
-
-  // New Calendar Grid
   weekHeader: {
     flexDirection: 'row',
     paddingHorizontal: 20,
@@ -1382,7 +1444,7 @@ const styles = StyleSheet.create({
   monthGrid: { flexDirection: 'row', flexWrap: 'wrap' },
   calendarDay: {
     width: CALENDAR_COL_WIDTH,
-    height: CALENDAR_COL_WIDTH, // Square
+    height: CALENDAR_COL_WIDTH,
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: CALENDAR_COL_WIDTH / 2,
@@ -1398,8 +1460,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#06b6d4',
     marginTop: 4,
   },
-
-  // Settings
   settingCard: {
     padding: 16,
     borderRadius: 12,
@@ -1416,8 +1476,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   themeButtonText: { fontSize: 14, fontWeight: '600' },
-
-  // Modal Novo
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.9)',
@@ -1499,8 +1557,6 @@ const styles = StyleSheet.create({
     height: 100,
   },
   tab: { flex: 1, alignItems: 'center' },
-
-  // History Cards (Restored Styles)
   historyCard: {
     padding: 16,
     borderRadius: 12,
